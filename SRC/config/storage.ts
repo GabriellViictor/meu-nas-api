@@ -2,12 +2,12 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 
-// === MUDANÇA IMPORTANTE ===
-// No Android (Termux), esse caminho aponta para a memória interna pública
-// No Windows (PC), ele vai salvar numa pasta 'downloads_nas' no projeto
+// Verifica se é Android (Termux)
 const isAndroid = process.platform === 'android';
-const UPLOAD_DIR = isAndroid 
-    ? '/data/data/com.termux/files/home/storage/downloads/GabrielNAS' // Caminho do Termux para Downloads
+
+// === ADICIONE O 'export' AQUI EMBAIXO ===
+export const UPLOAD_DIR = isAndroid 
+    ? '/data/data/com.termux/files/home/storage/downloads/GabrielNAS'
     : path.join(__dirname, '..', '..', 'downloads_nas');
 
 // Garante que a pasta existe
