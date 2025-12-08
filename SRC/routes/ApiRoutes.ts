@@ -4,13 +4,23 @@ import { uploadConfig } from '../config/storage';
 
 const router = Router();
 
-// Rota de teste
 router.get('/status', (req, res) => res.json({ status: 'NAS Online' }));
 
-// Rotas do NAS
+// === ROTAS DE ARQUIVOS ===
+// Upload (Agora suporta ?path=/Destino)
 router.post('/upload', uploadConfig.array('meusArquivos'), FileController.uploadFiles);
-router.get('/files', FileController.listFiles);           // Lista tudo
-router.get('/download/:filename', FileController.downloadFile); // Baixa um específico
-router.delete('/files/:filename', FileController.deleteFile);   // Deleta
+
+// Listar (Agora suporta ?path=/Fotos)
+router.get('/files', FileController.listFiles);
+
+// Download (Agora suporta ?path=/Fotos&filename=img.jpg)
+router.get('/download/:filename', FileController.downloadFile);
+
+// Deletar (Agora suporta ?path=/Fotos&filename=img.jpg)
+router.delete('/files/:filename', FileController.deleteFile);
+
+// === NOVAS ROTAS (PASTAS) ===
+router.post('/folders', FileController.createFolder); // Criar pasta
+router.post('/files/move', FileController.moveFiles); // Mover arquivos
 
 export default router;

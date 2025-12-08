@@ -6,82 +6,103 @@ import { UPLOAD_DIR } from '../config/storage';
 
 export class FileController {
 
-    // === 1. UPLOAD (COM AUTO-SCAN CORRIGIDO) ===
+    // Helper para garantir que o usuário não saia da pasta permitida (Segurança)
+    private static getSafePath(userPath: string): string {
+        const safePath = userPath ? path.normalize(userPath).replace(/^(\.\.[\/\\])+/, '') : '';
+        return path.join(UPLOAD_DIR, safePath);
+    }
+
+    // Helper para rodar o Media Scan do Termux
+    private static runMediaScan(targetPath: string) {
+        if (process.platform === 'android') {
+            const termuxBin = '/data/data/com.termux/files/usr/bin/termux-media-scan';
+            // Escaneia recursivamente a pasta alterada
+            exec(`${termuxBin} -r "${targetPath}"`, (err) => {
+                if (err) console.error("Erro no Media Scan:", err.message);
+            });
+        }
+    }
+
+    // === 1. UPLOAD (COM SUPORTE A SUBPASTAS) ===
     static async uploadFiles(req: Request, res: Response) {
         if (!req.files || (req.files as Express.Multer.File[]).length === 0) {
             return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
         }
-        
-        const arquivos = req.files as Express.Multer.File[];
-        
-        // Lógica específica para o Android/Termux
-        if (process.platform === 'android') {
-            console.log("Iniciando processo de Media Scan...");
-            
-            // 1. Caminho ABSOLUTO do executável do termux (para o Node não se perder)
-            const termuxBin = '/data/data/com.termux/files/usr/bin/termux-media-scan';
-            
-            // 2. Escaneia a pasta inteira (-r) onde salvamos (MyNas)
-            const command = `${termuxBin} -r "${UPLOAD_DIR}"`;
 
-            // Pequeno delay para garantir que o arquivo foi liberado pelo sistema
-            setTimeout(() => {
-                exec(command, (error, stdout, stderr) => {
-                    if (error) {
-                        console.error(`❌ ERRO CRÍTICO no Scan: ${error.message}`);
-                        return;
-                    }
-                    if (stderr) {
-                        console.error(`⚠️ Aviso do Scan: ${stderr}`);
-                    }
-                    console.log(`✅ Galeria do Android atualizada! Pasta: ${UPLOAD_DIR}`);
-                });
-            }, 1000);
+        const arquivos = req.files as Express.Multer.File[];
+
+        // Se o usuário mandou um ?path=/Fotos, movemos os arquivos para lá após o upload
+        const destinationFolder = req.query.path ? String(req.query.path) : '/';
+
+        if (destinationFolder !== '/') {
+            const targetDir = FileController.getSafePath(destinationFolder);
+
+            // Garante que a pasta existe
+            if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+
+            // Move cada arquivo da raiz (onde o Multer salvou) para a subpasta
+            arquivos.forEach(file => {
+                const oldPath = file.path; // Caminho onde o Multer salvou
+                const newPath = path.join(targetDir, file.filename);
+                fs.renameSync(oldPath, newPath);
+            });
         }
+
+        // Roda o scan na pasta correta
+        FileController.runMediaScan(FileController.getSafePath(destinationFolder));
 
         return res.json({
             message: 'Upload realizado com sucesso!',
-            files: arquivos.map(f => ({
-                filename: f.filename,
-                size: f.size
-            }))
+            files: arquivos.map(f => ({ filename: f.filename, size: f.size }))
         });
     }
 
-    // === 2. LISTAR ARQUIVOS DA PASTA MyNas ===
+    // === 2. LISTAR ARQUIVOS (COM SUBPASTAS) ===
     static async listFiles(req: Request, res: Response) {
         try {
-            // Lê a pasta configurada no storage.ts
-            const files = fs.readdirSync(UPLOAD_DIR);
-            
+            // Pega o caminho da URL (ex: /files?path=/Fotos) ou usa raiz
+            const currentPath = req.query.path ? String(req.query.path) : '/';
+            const fullPath = FileController.getSafePath(currentPath);
+
+            if (!fs.existsSync(fullPath)) {
+                return res.status(404).json({ error: 'Pasta não encontrada' });
+            }
+
+            const files = fs.readdirSync(fullPath);
+
             const fileList = files.map(fileName => {
-                const filePath = path.join(UPLOAD_DIR, fileName);
+                const filePath = path.join(fullPath, fileName);
                 try {
                     const stats = fs.statSync(filePath);
                     return {
                         name: fileName,
                         size: stats.size,
-                        createdAt: stats.birthtime
+                        createdAt: stats.birthtime,
+                        isDirectory: stats.isDirectory() // <--- IMPORTANTE PARA O APP
                     };
                 } catch (e) {
                     return null;
                 }
             }).filter(item => item !== null);
 
-            // Ordena: Mais recentes primeiro
-            fileList.sort((a, b) => (b?.createdAt.getTime() || 0) - (a?.createdAt.getTime() || 0));
+            // Ordena: Pastas primeiro, depois arquivos (mais recentes)
+            fileList.sort((a, b) => {
+                if (a!.isDirectory && !b!.isDirectory) return -1;
+                if (!a!.isDirectory && b!.isDirectory) return 1;
+                return (b?.createdAt.getTime() || 0) - (a?.createdAt.getTime() || 0);
+            });
 
             return res.json(fileList);
         } catch (error) {
-            console.error(error);
-            return res.status(500).json({ error: 'Erro ao listar arquivos da pasta MyNas' });
+            return res.status(500).json({ error: 'Erro ao listar arquivos' });
         }
     }
 
-    // === 3. DOWNLOAD ===
+    // === 3. DOWNLOAD (COM PATH) ===
     static async downloadFile(req: Request, res: Response) {
         const fileName = req.params.filename;
-        const filePath = path.join(UPLOAD_DIR, fileName);
+        const currentPath = req.query.path ? String(req.query.path) : '/';
+        const filePath = path.join(FileController.getSafePath(currentPath), fileName);
 
         if (fs.existsSync(filePath)) {
             return res.download(filePath);
@@ -90,27 +111,74 @@ export class FileController {
         }
     }
 
-    // === 4. DELETAR ===
+    // === 4. DELETAR (COM PATH) ===
     static async deleteFile(req: Request, res: Response) {
         const fileName = req.params.filename;
-        const filePath = path.join(UPLOAD_DIR, fileName);
+        const currentPath = req.query.path ? String(req.query.path) : '/';
+        const filePath = path.join(FileController.getSafePath(currentPath), fileName);
 
         if (fs.existsSync(filePath)) {
             try {
-                fs.unlinkSync(filePath);
-                
-                // Atualiza a galeria removendo o arquivo
-                if (process.platform === 'android') {
-                    const termuxBin = '/data/data/com.termux/files/usr/bin/termux-media-scan';
-                    exec(`${termuxBin} -r "${UPLOAD_DIR}"`);
+                // Se for pasta, usa rmdir, se for arquivo usa unlink
+                if (fs.lstatSync(filePath).isDirectory()) {
+                    fs.rmdirSync(filePath, { recursive: true });
+                } else {
+                    fs.unlinkSync(filePath);
                 }
 
-                return res.json({ message: 'Arquivo deletado com sucesso' });
+                FileController.runMediaScan(FileController.getSafePath(currentPath));
+                return res.json({ message: 'Item deletado com sucesso' });
             } catch (err) {
-                return res.status(500).json({ error: 'Erro ao deletar arquivo' });
+                return res.status(500).json({ error: 'Erro ao deletar item' });
             }
         } else {
             return res.status(404).json({ error: 'Arquivo não encontrado' });
+        }
+    }
+
+    // === 5. CRIAR PASTA (NOVO) ===
+    static async createFolder(req: Request, res: Response) {
+        const { folderName, currentPath } = req.body;
+        // currentPath vem do app (ex: /Fotos)
+        const targetPath = path.join(FileController.getSafePath(currentPath || '/'), folderName);
+
+        try {
+            if (!fs.existsSync(targetPath)) {
+                fs.mkdirSync(targetPath);
+                return res.status(201).json({ message: 'Pasta criada' });
+            }
+            return res.status(400).json({ error: 'Pasta já existe' });
+        } catch (error) {
+            return res.status(500).json({ error: 'Erro ao criar pasta' });
+        }
+    }
+
+    // === 6. MOVER ARQUIVOS (NOVO) ===
+    static async moveFiles(req: Request, res: Response) {
+        // files: ['a.jpg', 'b.png'], sourcePath: '/', destinationPath: '/Fotos'
+        const { files, sourcePath, destinationPath } = req.body;
+
+        const sourceDir = FileController.getSafePath(sourcePath || '/');
+        const destDir = FileController.getSafePath(destinationPath || '/');
+
+        try {
+            if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+
+            for (const fileName of files) {
+                const oldPath = path.join(sourceDir, fileName);
+                const newPath = path.join(destDir, fileName);
+
+                if (fs.existsSync(oldPath)) {
+                    fs.renameSync(oldPath, newPath);
+                }
+            }
+
+            FileController.runMediaScan(destDir);
+            FileController.runMediaScan(sourceDir);
+
+            return res.json({ message: 'Arquivos movidos' });
+        } catch (error) {
+            return res.status(500).json({ error: 'Erro ao mover arquivos' });
         }
     }
 }
